@@ -1,63 +1,56 @@
-import discord
-from discord.ext import commands
-import yt_dlp
-import asyncio
 import os
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+import yt_dlp
 
-# Настройка интентов (прав доступа)
-intents = discord.Intents.default()
-intents.message_content = True 
+# Берем токен из BotFather через переменные Railway
+TOKEN = os.getenv('BOT_TOKEN')
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
 
-# Настройки для музыки
-YDL_OPTIONS = {'format': 'bestaudio/best', 'noplaylist': 'True', 'quiet': True}
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
+# Папка для временного хранения песен
+if not os.path.exists('downloads'):
+    os.makedirs('downloads')
 
-@bot.event
-async def on_ready():
-    print(f'✅ Бот {bot.user.name} успешно запущен и готов играть музыку!')
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.reply("Привет! Я твой музыкальный бот. Пришли мне название песни или ссылку, и я её найду!")
 
-@bot.command()
-async def play(ctx, *, search):
-    """Команда для поиска и игры: !play [название]"""
-    if not ctx.author.voice:
-        return await ctx.send("Сначала зайди в голосовой канал!")
+@dp.message_handler()
+async def search_and_send(message: types.Message):
+    search_query = message.text
+    sent_msg = await message.answer(f"🔍 Ищу «{search_query}»...")
 
-    vc = ctx.guild.voice_client
-    if not vc:
-        vc = await ctx.author.voice.channel.connect()
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+    }
 
-    async with ctx.typing():
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            try:
-                info = ydl.extract_info(f"ytsearch:{search}", download=False)['entries'][0]
-                url = info['url']
-                title = info['title']
-            except Exception as e:
-                return await ctx.send(f"Ошибка поиска: {e}")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Ищем первую подходящую песню
+            info = ydl.extract_info(f"ytsearch1:{search_query}", download=True)['entries'][0]
+            file_path = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            title = info.get('title', 'Music')
 
-        # Если что-то уже играет, останавливаем
-        if vc.is_playing():
-            vc.stop()
+        await sent_msg.edit_text("📤 Отправляю файл...")
+        with open(file_path, 'rb') as audio:
+            await message.answer_audio(audio, caption=f"🎶 {title}")
+        
+        # Удаляем файл после отправки, чтобы не забивать место
+        os.remove(file_path)
+        await sent_msg.delete()
 
-        source = await discord.FFmpegOpusAudio.from_probe(url, **FFMPEG_OPTIONS)
-        vc.play(source)
-        await ctx.send(f'🎶 Сейчас играет: {title}')
+    except Exception as e:
+        await sent_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-@bot.command()
-async def stop(ctx):
-    """Остановка и выход: !stop"""
-    if ctx.guild.voice_client:
-        await ctx.guild.voice_client.disconnect()
-        await ctx.send("Музыка выключена, до связи!")
-
-# Берем токен из переменных Railway
-token = os.getenv('BOT_TOKEN')
-if token:
-    bot.run(token)
-else:
-    print("❌ ОШИБКА: Переменная BOT_TOKEN не найдена в настройках Railway!")
+if name == 'main':
+    executor.start_polling(dp, skip_updates=True)
