@@ -52,5 +52,5 @@ async def search_and_send(message: types.Message):
     except Exception as e:
         await sent_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
-if name == 'main':
+if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
