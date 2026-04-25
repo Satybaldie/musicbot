@@ -4,8 +4,11 @@ from datetime import datetime
 def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
+    # Таблица пользователей
     cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, reg_date TEXT)')
+    # Таблица Скачанных (История)
     cursor.execute('CREATE TABLE IF NOT EXISTS stats (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
+    # Таблица Плейлистов
     cursor.execute('CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
     conn.commit()
     conn.close()
