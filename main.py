@@ -46,8 +46,6 @@ def get_ydl_opts(query_type="yt"):
         }],
         'outtmpl': 'downloads/%(title)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
-        
-        # МАКИРОВКА ПОД БРАУЗЕР
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -55,26 +53,20 @@ def get_ydl_opts(query_type="yt"):
             'Referer': 'https://www.google.com/',
         }
     }
-    
-    # ПРОВЕРКА КУКИ: Если файл cookies.txt лежит в папке, бот его подхватит
     if os.path.exists('cookies.txt'):
         opts['cookiefile'] = 'cookies.txt'
-        
     return opts
 
-# Асинхронная загрузка (чтобы бот НЕ ЗАВИСАЛ)
+# Асинхронная загрузка
 async def download_logic(query, search_prefix):
     q_type = "yt" if "yt" in search_prefix else "sc"
     search_query = f"{search_prefix}:{query}"
-    
     def run_yt_dlp():
         with yt_dlp.YoutubeDL(get_ydl_opts(q_type)) as ydl:
             info = ydl.extract_info(search_query, download=True)['entries'][0]
             filename = ydl.prepare_filename(info)
             file_path = os.path.splitext(filename)[0] + ".mp3"
             return file_path, info.get('title', 'Music')
-
-    # Запускаем тяжелый процесс в отдельном потоке
     return await asyncio.get_event_loop().run_in_executor(None, run_yt_dlp)
 
 # 3. Обработчики
@@ -85,8 +77,8 @@ async def send_welcome(message: types.Message):
     welcome_text = (
         f"👋 **Привет, {message.from_user.first_name}!**\n\n"
         "Я твой **Музыкальный Помощник** 🎧\n"
-        "Найду любую песню и пришлю тебе её в MP3.\n\n"
-        "**Жми кнопку или просто напиши название!**"
+        "Здесь ты можешь найти свою любимую песню и слушать её бесплатно или скачать.\n"
+        "или ты можешь добавить свой плейлист и у меня есть функция моя волна в котором я могу тебе предлагать песню которая может тебе понравиться. 🌊"
     )
     await message.reply(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
@@ -101,12 +93,10 @@ async def broadcast(message: types.Message):
     if message.from_user.id == YOUR_ADMIN_ID:
         text = message.get_args()
         if not text: return await message.answer("Пример: `/send Текст`")
-        
         import sqlite3
         conn = sqlite3.connect('users.db')
         users = conn.execute('SELECT user_id FROM users').fetchall()
         conn.close()
-        
         for u in users:
             try:
                 await bot.send_message(u[0], text)
@@ -114,14 +104,25 @@ async def broadcast(message: types.Message):
             except: pass
         await message.answer("✅ Рассылка завершена!")
 
+# ИЗМЕНЕННАЯ КНОПКА: Сразу присылает MP3 из истории
 @dp.message_handler(lambda message: message.text == "📥 Скачанные")
-async def show_history(message: types.Message):
+async def show_history_mp3(message: types.Message):
     history = get_user_history(message.from_user.id)
-    if history:
-        text = "📥 **Твоя история поисков:**\n\n" + "\n".join([f"• `{h}`" for h in history])
-    else:
-        text = "История пока пуста 🤷‍♂️"
-    await message.answer(text, parse_mode="Markdown")
+    if not history:
+        return await message.answer("📥 История пока пуста. Найди свою первую песню! 😉")
+    
+    await message.answer("📥 **Загружаю твои последние песни...**")
+    
+    for query in history:
+        try:
+            # Ищем и скачиваем каждую песню из истории
+            file_path, title = await download_logic(query, "ytsearch1")
+            with open(file_path, 'rb') as audio:
+                await message.answer_audio(audio, caption=f"🎶 Из истории: **{title}**")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except:
+            continue # Если какая-то песня не нашлась, просто идем к следующей
 
 @dp.message_handler(lambda message: message.text in ["🔍 Найти песню", "🌊 Моя волна", "📂 Мои Плейлисты"])
 async def buttons_help(message: types.Message):
@@ -132,32 +133,26 @@ async def buttons_help(message: types.Message):
 async def main_search(message: types.Message):
     query = message.text
     log_download(message.from_user.id, query)
-    
     status_msg = await message.answer(f"🚀 Ищу: **{query}**...")
-    
     try:
-        # Пытаемся скачать (не блокируя другие задачи)
         file_path, title = await download_logic(query, "ytsearch1")
-        
         await status_msg.edit_text("⚡️ Почти готово, отправляю файл...")
         with open(file_path, 'rb') as audio:
             await message.answer_audio(audio, caption=f"🎶 **{title}**\nПриятного прослушивания!")
-        
         if os.path.exists(file_path):
             os.remove(file_path)
         await status_msg.delete()
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
+    except Exception:
         try:
             await status_msg.edit_text("🔍 Пробую резервный поиск...")
             file_path, title = await download_logic(query, "scsearch1")
             with open(file_path, 'rb') as audio:
                 await message.answer_audio(audio, caption=f"🎶 **{title}**")
-            os.remove(file_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
             await status_msg.delete()
         except:
-            await status_msg.edit_text("❌ Не удалось найти или скачать эту песню.")
+            await status_msg.edit_text("❌ Не удалось найти эту песню.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
