@@ -5,7 +5,7 @@ import requests
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from database import init_db, add_user, log_download, get_stats, get_user_history, add_to_playlist, get_user_playlist
+from database import init_db, add_user, log_download, get_user_history, add_to_playlist, get_user_playlist
 
 # НАСТРОЙКИ
 TOKEN = os.getenv('BOT_TOKEN')
@@ -31,7 +31,7 @@ def get_song_keyboard(title):
     )
     return markup
 
-# Резервный поиск через Google API
+# СПОСОБ 1: Поиск ссылки через Google API
 def google_search(query):
     try:
         url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&key={GOOGLE_API_KEY}&maxResults=1"
@@ -43,18 +43,8 @@ def google_search(query):
         return None
     return None
 
-async def download_audio(query):
-    # Очередность поиска: 1. Google API, 2. SoundCloud (самый стабильный), 3. YouTube Search
-    link = await asyncio.get_event_loop().run_in_executor(None, google_search, query)
-    
-    # Список стратегий поиска
-    search_strategies = []
-    if link:
-        search_strategies.append(link) # Прямая ссылка от Google
-    search_strategies.append(f"scsearch1:{query}") # SoundCloud
-    search_strategies.append(f"ytsearch1:{query}") # Обычный поиск YouTube
-
-    ydl_opts = {
+def get_ydl_opts():
+    opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
@@ -63,43 +53,61 @@ async def download_audio(query):
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
     }
+    # ПОДКЛЮЧЕНИЕ КУКИ
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+    return opts
 
-    last_exc = None
-    for target in search_strategies:
+async def download_audio(query):
+    # Пытаемся получить прямую ссылку от Google
+    google_link = await asyncio.get_event_loop().run_in_executor(None, google_search, query)
+    
+    # Очередность стратегий:
+    # 1. Google Link (YouTube)
+    # 2. SoundCloud Search (Самый надежный для серверов)
+    # 3. Встроенный поиск YouTube Search
+    strategies = []
+    if google_link: strategies.append(google_link)
+    strategies.append(f"scsearch1:{query}")
+    strategies.append(f"ytsearch1:{query}")
+
+    last_error = None
+    for target in strategies:
         try:
             def run_dl():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
                     info = ydl.extract_info(target, download=True)
                     entry = info['entries'][0] if 'entries' in info else info
                     path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
                     return path, entry.get('title', 'Music')
             return await asyncio.get_event_loop().run_in_executor(None, run_dl)
         except Exception as e:
-            last_exc = e
-            continue # Если не вышло, пробуем следующий источник
+            last_error = e
+            continue # Если ошибка, пробуем следующий способ
     
-    raise last_exc
+    raise last_error
 
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    await message.answer("🎧 Бот готов! Поиск усилен резервными каналами.", reply_markup=get_main_menu())
+    status_cookie = "✅ Куки активны" if os.path.exists('cookies.txt') else "⚠️ Работаю без куки"
+    await message.answer(f"🎧 Бот готов!\n{status_cookie}\nИспользую 3 метода поиска.", reply_markup=get_main_menu())
 
 @dp.callback_query_handler(lambda c: c.data.startswith(('pl_', 'dl_')))
 async def callbacks(call: types.CallbackQuery):
     action, name = call.data[:2], call.data[3:]
     if action == "pl":
         add_to_playlist(call.from_user.id, name)
-        await call.answer("➕ Добавлено в Плейлисты!")
+        await call.answer("🎶 Добавлено в Плейлист")
     else:
         log_download(call.from_user.id, name)
-        await call.answer("📥 Добавлено в Скачанные!")
+        await call.answer("📥 Добавлено в Скачанные")
 
 @dp.message_handler(lambda m: m.text == "📂 Мои Плейлисты")
 async def show_playlist(message: types.Message):
     songs = get_user_playlist(message.from_user.id)
-    if not songs: return await message.answer("📂 Плейлист пуст.")
-    await message.answer("📂 Загружаю песни...")
+    if not songs: return await message.answer("📂 Твой плейлист пуст.")
+    await message.answer("📂 Загружаю твой список...")
     for s in songs:
         try:
             path, title = await download_audio(s)
@@ -111,7 +119,7 @@ async def show_playlist(message: types.Message):
 async def show_history(message: types.Message):
     songs = get_user_history(message.from_user.id)
     if not songs: return await message.answer("📥 История пуста.")
-    await message.answer("📥 Загружаю историю...")
+    await message.answer("📥 Загружаю последние треки...")
     for s in songs:
         try:
             path, title = await download_audio(s)
@@ -121,7 +129,7 @@ async def show_history(message: types.Message):
 
 @dp.message_handler()
 async def search_song(message: types.Message):
-    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название!")
+    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Просто напиши название!")
     
     status = await message.answer(f"🔎 Ищу: **{message.text}**...")
     try:
@@ -130,8 +138,8 @@ async def search_song(message: types.Message):
             await message.answer_audio(f, caption=f"🎶 **{title}**", reply_markup=get_song_keyboard(title))
         if os.path.exists(path): os.remove(path)
         await status.delete()
-    except:
-        await status.edit_text("❌ Не удалось найти аудио даже через резервные каналы. Попробуй другое название.")
+    except Exception as e:
+        await status.edit_text("❌ Все методы поиска исчерпаны. Попробуй другое название.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
