@@ -4,12 +4,10 @@ from datetime import datetime
 def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    # Таблица пользователей
     cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, reg_date TEXT)')
-    # Таблица Скачанных (История)
     cursor.execute('CREATE TABLE IF NOT EXISTS stats (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
-    # Таблица Плейлистов
     cursor.execute('CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS file_cache (query TEXT PRIMARY KEY, file_id TEXT, title TEXT)')
     conn.commit()
     conn.close()
 
@@ -34,24 +32,16 @@ def add_to_playlist(user_id, query):
     conn.commit()
     conn.close()
 
-def get_stats():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM users'); u = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM stats'); d = cursor.fetchone()[0]
-    conn.close()
-    return u, d
-
 def get_user_history(user_id):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT DISTINCT query FROM stats WHERE user_id = ? ORDER BY timestamp DESC LIMIT 5', (user_id,))
+    cursor.execute('SELECT DISTINCT query FROM stats WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10', (user_id,))
     h = cursor.fetchall(); conn.close()
     return [i[0] for i in h] if h else []
 
 def get_user_playlist(user_id):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT DISTINCT query FROM playlists WHERE user_id = ? ORDER BY timestamp DESC LIMIT 5', (user_id,))
+    cursor.execute('SELECT DISTINCT query FROM playlists WHERE user_id = ? ORDER BY timestamp DESC', (user_id,))
     h = cursor.fetchall(); conn.close()
     return [i[0] for i in h] if h else []
