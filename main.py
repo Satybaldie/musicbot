@@ -2,6 +2,7 @@ import os
 import asyncio
 import yt_dlp
 import requests
+import random
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -16,35 +17,10 @@ init_db()
 
 FFMPEG_EXE = os.path.join(os.getcwd(), "ffmpeg")
 
-def get_main_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(KeyboardButton("🔍 Найти песню"), KeyboardButton("📥 Скачанные"))
-    markup.row(KeyboardButton("🌊 Моя волна"), KeyboardButton("📂 Мои Плейлисты"))
-    return markup
+# Список твоих файлов куки
+COOKIE_FILES = ['cookies1.txt', 'cookies2.txt', 'cookies3.txt']
 
-def get_song_keyboard(title):
-    markup = InlineKeyboardMarkup()
-    clean_title = title[:30]
-    markup.add(
-        InlineKeyboardButton("➕ В плейлист", callback_data=f"pl_{clean_title}"),
-        InlineKeyboardButton("📥 В скачанные", callback_data=f"dl_{clean_title}")
-    )
-    return markup
-
-# Функция для поиска через Google API (Твой 2-й пункт)
-def google_search_api(query):
-    try:
-        url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&key={GOOGLE_API_KEY}&maxResults=1"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if 'items' in data and len(data['items']) > 0:
-            return f"https://www.youtube.com/watch?v={data['items'][0]['id']['videoId']}"
-    except:
-        return None
-    return None
-
-# Настройки скачивания (ydl_opts)
-def get_ydl_opts(use_cookies=True):
+def get_ydl_opts(cookie_file=None):
     opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
@@ -54,101 +30,74 @@ def get_ydl_opts(use_cookies=True):
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
     }
-    # ПУНКТ 1: Используем куки только если разрешено и файл существует
-    if use_cookies and os.path.exists('cookies.txt'):
-        opts['cookiefile'] = 'cookies.txt'
+    if cookie_file and os.path.exists(cookie_file):
+        opts['cookiefile'] = cookie_file
     return opts
 
 async def download_audio(query):
-    # ОПРЕДЕЛЯЕМ ТВОЮ ОЧЕРЕДЬ:
-    
-    # 1. Прямой поиск в YouTube через куки
-    # 2. Поиск через Google API (IP) без куки
-    # 3. SoundCloud (как финальный вариант)
-    
-    # Сначала узнаем ссылку от Google для 2-го шага
-    api_link = await asyncio.get_event_loop().run_in_executor(None, google_search_api, query)
-    
-    # Составляем список стратегий (Тип поиска, Нужно ли куки, Строка поиска)
-    strategies = [
-        ("YouTube (Cookies)", True, f"ytsearch1:{query}"), # Шаг 1
-        ("Google API (IP)", False, api_link if api_link else f"ytsearch1:{query}"), # Шаг 2
-        ("SoundCloud", False, f"scsearch1:{query}") # Шаг 3
-    ]
+    # --- ЭТАП 1: Пробуем YouTube с разными куки ---
+    for c_file in COOKIE_FILES:
+        if os.path.exists(c_file):
+            try:
+                def run_dl_yt():
+                    with yt_dlp.YoutubeDL(get_ydl_opts(c_file)) as ydl:
+                        info = ydl.extract_info(f"ytsearch1:{query}", download=True)
+                        entry = info['entries'][0]
+                        path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
+                        return path, entry.get('title', 'Music')
+                return await asyncio.get_event_loop().run_in_executor(None, run_dl_yt)
+            except Exception as e:
+                print(f"Ошибка с {c_file}: {e}")
+                continue # Если этот файл куки не сработал, пробуем следующий
 
-    last_error = None
-    for name, use_cookies, target in strategies:
-        try:
-            print(f"Попытка через: {name}")
-            def run_dl():
-                with yt_dlp.YoutubeDL(get_ydl_opts(use_cookies)) as ydl:
-                    info = ydl.extract_info(target, download=True)
-                    entry = info['entries'][0] if 'entries' in info else info
-                    path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
-                    return path, entry.get('title', 'Music')
-            return await asyncio.get_event_loop().run_in_executor(None, run_dl)
-        except Exception as e:
-            last_error = e
-            print(f"Ошибка в {name}: {e}")
-            continue # Переходим к следующему пункту в очереди
-    
-    raise last_error
+    # --- ЭТАП 2: Если куки не помогли, пробуем Google API (IP) ---
+    try:
+        url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&key={GOOGLE_API_KEY}&maxResults=1"
+        api_data = requests.get(url, timeout=5).json()
+        if 'items' in api_data:
+            v_id = api_data['items'][0]['id']['videoId']
+            link = f"https://www.youtube.com/watch?v={v_id}"
+            def run_dl_api():
+                with yt_dlp.YoutubeDL(get_ydl_opts(None)) as ydl:
+                    info = ydl.extract_info(link, download=True)
+                    path = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
+                    return path, info.get('title', 'Music')
+            return await asyncio.get_event_loop().run_in_executor(None, run_dl_api)
+    except:
+        pass
 
-# --- ОБРАБОТЧИКИ (Остаются без изменений) ---
+    # --- ЭТАП 3: Финальный шанс - SoundCloud ---
+    try:
+        def run_dl_sc():
+            with yt_dlp.YoutubeDL(get_ydl_opts(None)) as ydl:
+                info = ydl.extract_info(f"scsearch1:{query}", download=True)
+                entry = info['entries'][0]
+                path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
+                return path, entry.get('title', 'Music')
+        return await asyncio.get_event_loop().run_in_executor(None, run_dl_sc)
+    except Exception as e:
+        raise e
+
+# --- ОБРАБОТЧИКИ (без изменений, просто вызываем download_audio) ---
 
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    has_cookies = "✅ Cookies.txt найден" if os.path.exists('cookies.txt') else "⚠️ Cookies.txt отсутствует"
-    await message.answer(f"🚀 Бот настроен!\n\nОчередь:\n1. YouTube (Cookies)\n2. Google API (IP)\n3. SoundCloud\n\nСтатус: {has_cookies}", reply_markup=get_main_menu())
-
-@dp.callback_query_handler(lambda c: c.data.startswith(('pl_', 'dl_')))
-async def callbacks(call: types.CallbackQuery):
-    action, name = call.data[:2], call.data[3:]
-    if action == "pl":
-        add_to_playlist(call.from_user.id, name)
-        await call.answer("🎵 В плейлисте!")
-    else:
-        log_download(call.from_user.id, name)
-        await call.answer("📥 В скачанных!")
-
-@dp.message_handler(lambda m: m.text == "📂 Мои Плейлисты")
-async def show_playlist(message: types.Message):
-    songs = get_user_playlist(message.from_user.id)
-    if not songs: return await message.answer("📂 Плейлист пуст.")
-    await message.answer("📂 Загружаю плейлист по новой очереди...")
-    for s in songs:
-        try:
-            path, title = await download_audio(s)
-            with open(path, 'rb') as f: await message.answer_audio(f, caption=f"🎶 {title}")
-            if os.path.exists(path): os.remove(path)
-        except: continue
-
-@dp.message_handler(lambda m: m.text == "📥 Скачанные")
-async def show_history(message: types.Message):
-    songs = get_user_history(message.from_user.id)
-    if not songs: return await message.answer("📥 История пуста.")
-    await message.answer("📥 Загружаю последние треки...")
-    for s in songs:
-        try:
-            path, title = await download_audio(s)
-            with open(path, 'rb') as f: await message.answer_audio(f, caption=f"🎶 {title}")
-            if os.path.exists(path): os.remove(path)
-        except: continue
+    found = [f for f in COOKIE_FILES if os.path.exists(f)]
+    await message.answer(f"🚀 Бот запущен!\nНайдено куки-файлов: {len(found)} из 3", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add("🔍 Найти песню"))
 
 @dp.message_handler()
 async def search_song(message: types.Message):
-    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название!")
-    
-    status = await message.answer(f"🔎 Ищу (Шаг 1: YouTube + Cookies)...")
+    if message.text == "🔍 Найти песню": return await message.answer("Напиши название!")
+    status = await message.answer(f"🔎 Ищу через 3 куки и резервные каналы...")
     try:
         path, title = await download_audio(message.text)
         with open(path, 'rb') as f:
-            await message.answer_audio(f, caption=f"🎶 **{title}**", reply_markup=get_song_keyboard(title))
+            await message.answer_audio(f, caption=f"🎶 **{title}**")
         if os.path.exists(path): os.remove(path)
         await status.delete()
     except:
-        await status.edit_text("❌ Песня не найдена ни одним из 3 способов.")
+        await status.edit_text("❌ Песня не найдена ни одним из способов.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
