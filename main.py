@@ -7,7 +7,7 @@ from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from database import init_db, add_user, log_download, get_stats, get_user_history, add_to_playlist, get_user_playlist
 
-# НАСТРОЙКИ (Ключи вставлены)
+# НАСТРОЙКИ
 TOKEN = os.getenv('BOT_TOKEN')
 GOOGLE_API_KEY = "AIzaSyBPqLNBRJAXxv4HyMO-WMFMns95YccOB2c"
 bot = Bot(token=TOKEN)
@@ -17,14 +17,12 @@ YOUR_ADMIN_ID = 5932714152
 init_db()
 FFMPEG_EXE = os.path.join(os.getcwd(), "ffmpeg")
 
-# Главное меню
 def get_main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton("🔍 Найти песню"), KeyboardButton("📥 Скачанные"))
     markup.row(KeyboardButton("🌊 Моя волна"), KeyboardButton("📂 Мои Плейлисты"))
     return markup
 
-# Кнопки под песней
 def get_song_keyboard(title):
     markup = InlineKeyboardMarkup()
     clean_title = title[:30]
@@ -34,14 +32,13 @@ def get_song_keyboard(title):
     )
     return markup
 
-# Официальный поиск через YouTube API
 def google_search(query):
     try:
         url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&key={GOOGLE_API_KEY}&maxResults=1"
-        response = requests.get(url).json()
-        if 'items' in response and len(response['items']) > 0:
-            video_id = response['items'][0]['id']['videoId']
-            return f"https://www.youtube.com/watch?v={video_id}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if 'items' in data and len(data['items']) > 0:
+            return f"https://www.youtube.com/watch?v={data['items'][0]['id']['videoId']}"
     except:
         return None
     return None
@@ -57,11 +54,9 @@ def get_ydl_opts():
     }
 
 async def fast_download(query):
-    # 1. Получаем прямую ссылку через Google
+    # Пытаемся найти через Google, если нет - используем поиск yt-dlp напрямую
     video_url = await asyncio.get_event_loop().run_in_executor(None, google_search, query)
-    
-    # 2. Если Google не нашел (редко), пробуем SoundCloud
-    target = video_url if video_url else f"scsearch1:{query}"
+    target = video_url if video_url else f"ytsearch1:{query}"
 
     def run():
         with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
@@ -76,23 +71,23 @@ async def fast_download(query):
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    await message.reply(f"👋 Привет! Бот работает через Google API. Напиши название песни!", reply_markup=get_main_menu())
+    await message.reply(f"👋 Привет! Напиши название песни!", reply_markup=get_main_menu())
 
 @dp.callback_query_handler(lambda c: c.data.startswith(('pl_', 'dl_')))
 async def process_callback(callback_query: types.CallbackQuery):
     action, song_name = callback_query.data[:2], callback_query.data[3:]
     if action == "pl":
         add_to_playlist(callback_query.from_user.id, song_name)
-        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Плейлисты!")
+        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Плейлист")
     else:
         log_download(callback_query.from_user.id, song_name)
-        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Скачанные!")
+        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Скачанные")
 
 @dp.message_handler(lambda m: m.text == "📂 Мои Плейлисты")
 async def btn_playlist(message: types.Message):
     songs = get_user_playlist(message.from_user.id)
     if not songs: return await message.answer("📂 Плейлист пуст.")
-    await message.answer("📂 Загружаю твой плейлист...")
+    await message.answer("📂 Загружаю песни из плейлиста...")
     for s in songs:
         try:
             path, title = await fast_download(s)
@@ -104,7 +99,7 @@ async def btn_playlist(message: types.Message):
 async def btn_history(message: types.Message):
     history = get_user_history(message.from_user.id)
     if not history: return await message.answer("📥 История пуста.")
-    await message.answer("📥 Твои последние скачанные:")
+    await message.answer("📥 Загружаю последние песни...")
     for q in history:
         try:
             path, title = await fast_download(q)
@@ -114,9 +109,9 @@ async def btn_history(message: types.Message):
 
 @dp.message_handler()
 async def search(message: types.Message):
-    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название песни!")
+    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название!")
     query = message.text
-    status = await message.answer(f"🚀 Ищу через Google: **{query}**...")
+    status = await message.answer(f"🚀 Ищу: **{query}**...")
     try:
         path, title = await fast_download(query)
         with open(path, 'rb') as f:
@@ -124,7 +119,7 @@ async def search(message: types.Message):
         if os.path.exists(path): os.remove(path)
         await status.delete()
     except Exception as e:
-        await status.edit_text(f"❌ Ошибка: {str(e)[:50]}. Попробуй еще раз.")
+        await status.edit_text(f"❌ Не нашел. Попробуй другое название.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
