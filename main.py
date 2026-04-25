@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# Импортируем функции из database.py
+# Импортируем функции базы данных
 from database import init_db, add_user, log_download, get_stats, get_user_history
 
 # 1. Настройка
@@ -16,7 +16,7 @@ dp = Dispatcher(bot)
 # Твой ID администратора
 YOUR_ADMIN_ID = 5932714152
 
-# Инициализация базы данных при запуске
+# Инициализация базы данных
 init_db()
 
 # Путь к ffmpeg
@@ -29,12 +29,11 @@ def get_main_menu():
     btn_downloaded = KeyboardButton("📥 Скачанные")
     btn_wave = KeyboardButton("🌊 Моя волна")
     btn_playlists = KeyboardButton("📂 Мои Плейлисты")
-    
     markup.row(btn_search, btn_downloaded)
     markup.row(btn_wave, btn_playlists)
     return markup
 
-# Настройки для скачивания через yt-dlp
+# Настройки маскировки для YouTube
 def get_ydl_opts(query_type="yt"):
     opts = {
         'format': 'bestaudio/best',
@@ -47,38 +46,47 @@ def get_ydl_opts(query_type="yt"):
         }],
         'outtmpl': 'downloads/%(title)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        
+        # МАКИРОВКА ПОД БРАУЗЕР
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.google.com/',
+        }
     }
+    
+    # ПРОВЕРКА КУКИ: Если файл cookies.txt лежит в папке, бот его подхватит
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+        
     return opts
 
+# Асинхронная загрузка (чтобы бот НЕ ЗАВИСАЛ)
 async def download_logic(query, search_prefix):
     q_type = "yt" if "yt" in search_prefix else "sc"
     search_query = f"{search_prefix}:{query}"
-    loop = asyncio.get_event_loop()
     
-    def extract():
+    def run_yt_dlp():
         with yt_dlp.YoutubeDL(get_ydl_opts(q_type)) as ydl:
             info = ydl.extract_info(search_query, download=True)['entries'][0]
-            expected_filename = ydl.prepare_filename(info)
-            file_path = os.path.splitext(expected_filename)[0] + ".mp3"
+            filename = ydl.prepare_filename(info)
+            file_path = os.path.splitext(filename)[0] + ".mp3"
             return file_path, info.get('title', 'Music')
-    return await loop.run_in_executor(None, extract)
 
-# 3. Обработчики команд и кнопок
+    # Запускаем тяжелый процесс в отдельном потоке
+    return await asyncio.get_event_loop().run_in_executor(None, run_yt_dlp)
+
+# 3. Обработчики
 
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
-    # Регистрируем пользователя
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    
     welcome_text = (
         f"👋 **Привет, {message.from_user.first_name}!**\n\n"
-        "Я твой персональный **Музыкальный Помощник** 🎧\n\n"
-        "Здесь ты можешь найти свою любимую песню и слушать её бесплатно или скачать.\n\n"
-        "**Мои возможности:**\n"
-        "🔍 **Поиск:** Найду любой трек по названию или словам.\n"
-        "📥 **Скачанные:** Твоя персональная история поисков.\n"
-        "🌊 **Моя волна:** Рекомендации специально для тебя! ✨"
+        "Я твой **Музыкальный Помощник** 🎧\n"
+        "Найду любую песню и пришлю тебе её в MP3.\n\n"
+        "**Жми кнопку или просто напиши название!**"
     )
     await message.reply(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
@@ -86,94 +94,71 @@ async def send_welcome(message: types.Message):
 async def admin_stats(message: types.Message):
     if message.from_user.id == YOUR_ADMIN_ID:
         u_count, d_count = get_stats()
-        await message.answer(f"📊 **Статистика бота:**\n\n👤 Пользователей: {u_count}\n🎵 Всего скачиваний: {d_count}")
-    else:
-        await message.answer("❌ У вас нет прав доступа к этой команде.")
+        await message.answer(f"📊 **Статистика:**\n👤 Юзеров: {u_count}\n🎵 Скачано: {d_count}")
 
 @dp.message_handler(commands=['send'])
 async def broadcast(message: types.Message):
     if message.from_user.id == YOUR_ADMIN_ID:
-        broadcast_text = message.get_args()
-        if not broadcast_text:
-            return await message.answer("❌ Введите текст рассылки: `/send Привет!`", parse_mode="Markdown")
+        text = message.get_args()
+        if not text: return await message.answer("Пример: `/send Текст`")
         
         import sqlite3
         conn = sqlite3.connect('users.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id FROM users')
-        users = cursor.fetchall()
+        users = conn.execute('SELECT user_id FROM users').fetchall()
         conn.close()
         
-        count = 0
-        status = await message.answer(f"📢 Рассылка на {len(users)} чел. началась...")
-        for user in users:
+        for u in users:
             try:
-                await bot.send_message(user[0], broadcast_text)
-                count += 1
+                await bot.send_message(u[0], text)
                 await asyncio.sleep(0.05)
-            except Exception:
-                pass
-        await status.edit_text(f"✅ Рассылка завершена!\nПолучили: {count} пользователей.")
-    else:
-        await message.answer("❌ Доступ запрещен.")
+            except: pass
+        await message.answer("✅ Рассылка завершена!")
 
 @dp.message_handler(lambda message: message.text == "📥 Скачанные")
-async def downloaded_history(message: types.Message):
+async def show_history(message: types.Message):
     history = get_user_history(message.from_user.id)
     if history:
-        text = "📥 **Твои последние запросы:**\n\n"
-        for item in history:
-            text += f"• `{item}`\n"
-        text += "\n_Нажми на название, чтобы скопировать его, и отправь мне для повторного поиска!_"
+        text = "📥 **Твоя история поисков:**\n\n" + "\n".join([f"• `{h}`" for h in history])
     else:
-        text = "📥 В твоей истории пока пусто. Найди свою первую песню! 😉"
-    
+        text = "История пока пуста 🤷‍♂️"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message_handler(lambda message: message.text == "🔍 Найти песню")
-async def search_help(message: types.Message):
-    await message.answer("🎵 Просто **напиши название песни** или строчку из неё прямо сюда!")
+@dp.message_handler(lambda message: message.text in ["🔍 Найти песню", "🌊 Моя волна", "📂 Мои Плейлисты"])
+async def buttons_help(message: types.Message):
+    await message.answer("Просто отправь мне название песни текстом! 👇")
 
-@dp.message_handler(lambda message: message.text == "🌊 Моя волна")
-async def wave_info(message: types.Message):
-    await message.answer("🌊 **Моя волна** подбирает музыку под твой вкус! (Функция в процессе настройки 🛠)")
-
-@dp.message_handler(lambda message: message.text == "📂 Мои Плейлисты")
-async def playlists_info(message: types.Message):
-    await message.answer("📂 Пришли ссылку на плейлист (YouTube/SoundCloud), и я скачаю его целиком!")
-
-# 4. Логика поиска и скачивания
+# ГЛАВНЫЙ ПОИСК
 @dp.message_handler()
 async def main_search(message: types.Message):
     query = message.text
-    log_download(message.from_user.id, query) # Сохраняем запрос в историю
+    log_download(message.from_user.id, query)
     
     status_msg = await message.answer(f"🚀 Ищу: **{query}**...")
     
     try:
-        # 1-я попытка: YouTube
+        # Пытаемся скачать (не блокируя другие задачи)
         file_path, title = await download_logic(query, "ytsearch1")
-    except Exception:
-        try:
-            # 2-я попытка: SoundCloud
-            await status_msg.edit_text("🔍 Ищу в резервном источнике...")
-            file_path, title = await download_logic(query, "scsearch1")
-        except Exception:
-            return await status_msg.edit_text("❌ Не удалось найти песню. Попробуй уточнить название.")
-
-    try:
-        await status_msg.edit_text("⚡️ Загружаю в Telegram...")
+        
+        await status_msg.edit_text("⚡️ Почти готово, отправляю файл...")
         with open(file_path, 'rb') as audio:
-            await message.answer_audio(audio, caption=f"🎶 **{title}**\nПриятного прослушивания! ✨")
+            await message.answer_audio(audio, caption=f"🎶 **{title}**\nПриятного прослушивания!")
         
         if os.path.exists(file_path):
             os.remove(file_path)
         await status_msg.delete()
+        
     except Exception as e:
-        await message.answer(f"❌ Ошибка отправки файла: {e}")
+        print(f"Ошибка: {e}")
+        try:
+            await status_msg.edit_text("🔍 Пробую резервный поиск...")
+            file_path, title = await download_logic(query, "scsearch1")
+            with open(file_path, 'rb') as audio:
+                await message.answer_audio(audio, caption=f"🎶 **{title}**")
+            os.remove(file_path)
+            await status_msg.delete()
+        except:
+            await status_msg.edit_text("❌ Не удалось найти или скачать эту песню.")
 
 if __name__ == '__main__':
-    if not os.path.exists('downloads'):
-        os.makedirs('downloads')
-    print("Бот успешно запущен!")
+    if not os.path.exists('downloads'): os.makedirs('downloads')
     executor.start_polling(dp, skip_updates=True)
