@@ -13,7 +13,7 @@ def init_db():
             reg_date TEXT
         )
     ''')
-    # Таблица статистики скачиваний
+    # Таблица статистики поисков
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,3 +50,16 @@ def get_stats():
     total_downloads = cursor.fetchone()[0]
     conn.close()
     return total_users, total_downloads
+
+def get_user_history(user_id):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    # Получаем 5 последних уникальных запросов пользователя
+    cursor.execute('''
+        SELECT DISTINCT query FROM stats 
+        WHERE user_id = ? 
+        ORDER BY timestamp DESC LIMIT 5
+    ''', (user_id,))
+    history = cursor.fetchall()
+    conn.close()
+    return [h[0] for h in history]
