@@ -5,27 +5,32 @@ def init_db():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     # Таблица пользователей
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users 
-                   (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, reg_date TEXT)''')
-    # Таблица истории поисков
-    cursor.execute('''CREATE TABLE IF NOT EXISTS stats 
-                   (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, reg_date TEXT)')
+    # Таблица истории (Скачанные)
+    cursor.execute('CREATE TABLE IF NOT EXISTS stats (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
+    # Таблица Плейлистов
+    cursor.execute('CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, query TEXT, timestamp TEXT)')
     conn.commit()
     conn.close()
 
 def add_user(user_id, username, first_name):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)', 
-                   (user_id, username, str(first_name), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    cursor.execute('INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)', (user_id, username, str(first_name), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
 def log_download(user_id, query):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO stats (user_id, query, timestamp) VALUES (?, ?, ?)', 
-                   (user_id, query, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    cursor.execute('INSERT INTO stats (user_id, query, timestamp) VALUES (?, ?, ?)', (user_id, query, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def add_to_playlist(user_id, query):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO playlists (user_id, query, timestamp) VALUES (?, ?, ?)', (user_id, query, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -40,8 +45,13 @@ def get_stats():
 def get_user_history(user_id):
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    # Берем последние 5 уникальных успешных запросов
     cursor.execute('SELECT DISTINCT query FROM stats WHERE user_id = ? ORDER BY timestamp DESC LIMIT 5', (user_id,))
-    h = cursor.fetchall()
-    conn.close()
+    h = cursor.fetchall(); conn.close()
+    return [i[0] for i in h] if h else []
+
+def get_user_playlist(user_id):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT query FROM playlists WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10', (user_id,))
+    h = cursor.fetchall(); conn.close()
     return [i[0] for i in h] if h else []

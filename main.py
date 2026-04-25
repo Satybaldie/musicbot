@@ -3,10 +3,9 @@ import asyncio
 import yt_dlp
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from database import init_db, add_user, log_download, get_stats, get_user_history
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from database import init_db, add_user, log_download, get_stats, get_user_history, add_to_playlist, get_user_playlist
 
-# Настройки
 TOKEN = os.getenv('BOT_TOKEN')
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
@@ -15,29 +14,36 @@ YOUR_ADMIN_ID = 5932714152
 init_db()
 FFMPEG_EXE = os.path.join(os.getcwd(), "ffmpeg")
 
-# Клавиатура
+# Главное меню (кнопки внизу)
 def get_main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton("🔍 Найти песню"), KeyboardButton("📥 Скачанные"))
     markup.row(KeyboardButton("🌊 Моя волна"), KeyboardButton("📂 Мои Плейлисты"))
     return markup
 
-# Опции загрузки
+# Кнопки под песней (Inline)
+def get_song_keyboard(query):
+    markup = InlineKeyboardMarkup()
+    # Сохраняем название песни в callback_data (лимит 64 символа)
+    short_query = query[:30]
+    markup.add(
+        InlineKeyboardButton("➕ В плейлист", callback_data=f"pl_{short_query}"),
+        InlineKeyboardButton("📥 В скачанные", callback_data=f"dl_{short_query}")
+    )
+    return markup
+
 def get_ydl_opts():
     opts = {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
-        'no_warnings': True,
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
-        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
     }
     if os.path.exists('cookies.txt'): opts['cookiefile'] = 'cookies.txt'
     return opts
 
-# Фоновая функция скачивания
 async def fast_download(query, prefix="ytsearch1"):
     def run():
         with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
@@ -46,75 +52,66 @@ async def fast_download(query, prefix="ytsearch1"):
             return path, info.get('title', 'Music')
     return await asyncio.get_event_loop().run_in_executor(None, run)
 
-# Обработка команд
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    await message.reply(f"👋 Привет! Я твой Музыкальный Помощник 🎧", reply_markup=get_main_menu())
+    await message.reply(f"👋 Привет! Я твой Музыкальный Менеджер 🎧", reply_markup=get_main_menu())
 
-@dp.message_handler(commands=['admin'])
-async def cmd_admin(message: types.Message):
-    if message.from_user.id == YOUR_ADMIN_ID:
-        u, d = get_stats()
-        await message.answer(f"📊 Юзеров в базе: {u}\n🎵 Всего скачано: {d}")
+# Обработка нажатий на кнопки под песней
+@dp.callback_query_handler(lambda c: c.data.startswith(('pl_', 'dl_')))
+async def process_callback(callback_query: types.CallbackQuery):
+    action = callback_query.data[:2] # pl или dl
+    song_name = callback_query.data[3:]
+    
+    if action == "pl":
+        add_to_playlist(callback_query.from_user.id, song_name)
+        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Плейлисты!")
+    else:
+        log_download(callback_query.from_user.id, song_name)
+        await bot.answer_callback_query(callback_query.id, "✅ Добавлено в Скачанные!")
 
-@dp.message_handler(commands=['send'])
-async def cmd_send(message: types.Message):
-    if message.from_user.id == YOUR_ADMIN_ID:
-        text = message.get_args()
-        if not text: return await message.answer("Используй: /send Текст")
-        import sqlite3
-        conn = sqlite3.connect('users.db')
-        users = conn.execute('SELECT user_id FROM users').fetchall(); conn.close()
-        for u in users:
-            try: await bot.send_message(u[0], text); await asyncio.sleep(0.05)
-            except: pass
-        await message.answer("✅ Рассылка завершена!")
-
-# КНОПКА СКАЧАННЫЕ (MP3 ИЗ ИСТОРИИ)
-@dp.message_handler(lambda m: m.text == "📥 Скачанные")
-async def btn_history(message: types.Message):
-    history = get_user_history(message.from_user.id)
-    if not history:
-        return await message.answer("📥 История пуста. Сначала скачай любую песню!")
-
-    await message.answer("📥 Поднимаю архивы... Сейчас пришлю MP3 из твоей истории!")
-    for q in history:
+# КНОПКА МОИ ПЛЕЙЛИСТЫ
+@dp.message_handler(lambda m: m.text == "📂 Мои Плейлисты")
+async def btn_playlist(message: types.Message):
+    songs = get_user_playlist(message.from_user.id)
+    if not songs: return await message.answer("📂 Плейлист пуст. Добавь песни кнопкой под файлом!")
+    await message.answer("📂 Твой Плейлист (загружаю...):")
+    for s in songs:
         try:
-            path, title = await fast_download(q)
-            with open(path, 'rb') as f:
-                await message.answer_audio(f, caption=f"🎶 Из истории: **{title}**")
+            path, title = await fast_download(s)
+            with open(path, 'rb') as f: await message.answer_audio(f)
             if os.path.exists(path): os.remove(path)
         except: continue
 
-@dp.message_handler(lambda m: m.text in ["🔍 Найти песню", "🌊 Моя волна", "📂 Мои Плейлисты"])
-async def btn_help(message: types.Message):
-    await message.answer("🎵 Просто напиши название песни прямо в чат!")
+# КНОПКА СКАЧАННЫЕ
+@dp.message_handler(lambda m: m.text == "📥 Скачанные")
+async def btn_history(message: types.Message):
+    history = get_user_history(message.from_user.id)
+    if not history: return await message.answer("📥 История пуста.")
+    await message.answer("📥 Твоя история скачиваний:")
+    for q in history:
+        try:
+            path, title = await fast_download(q)
+            with open(path, 'rb') as f: await message.answer_audio(f)
+            if os.path.exists(path): os.remove(path)
+        except: continue
 
 # ГЛАВНЫЙ ПОИСК
 @dp.message_handler()
 async def search(message: types.Message):
-    query = message.text
-    log_download(message.from_user.id, query) # Запись в историю
+    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название!")
     
+    query = message.text
     status = await message.answer(f"🚀 Ищу: **{query}**...")
     try:
         path, title = await fast_download(query)
-        await status.edit_text("⚡️ Отправляю...")
         with open(path, 'rb') as f:
-            await message.answer_audio(f, caption=f"🎶 **{title}**")
+            # Отправляем песню с кнопками!
+            await message.answer_audio(f, caption=f"🎶 **{title}**", reply_markup=get_song_keyboard(title))
         if os.path.exists(path): os.remove(path)
         await status.delete()
     except:
-        try:
-            await status.edit_text("🔍 Пробую резервный источник...")
-            path, title = await fast_download(query, "scsearch1")
-            with open(path, 'rb') as f:
-                await message.answer_audio(f, caption=f"🎶 **{title}**")
-            if os.path.exists(path): os.remove(path)
-            await status.delete()
-        except:
-            await status.edit_text("❌ Не удалось найти песню.")
+        await status.edit_text("❌ Не нашел. Попробуй другое название.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
