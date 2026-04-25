@@ -5,15 +5,21 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# 1. Сначала инициализация
+# Импортируем функции базы данных
+from database import init_db, add_user, log_download, get_stats
+
+# 1. Инициализация
 TOKEN = os.getenv('BOT_TOKEN')
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-# Путь к нашему встроенному ffmpeg
+# Инициализируем БД при старте
+init_db()
+
+# Путь к ffmpeg
 FFMPEG_EXE = os.path.join(os.getcwd(), "ffmpeg")
 
-# 2. Функция для создания меню
+# 2. Главное меню
 def get_main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     btn_search = KeyboardButton("🔍 Найти песню")
@@ -25,7 +31,7 @@ def get_main_menu():
     markup.row(btn_wave, btn_playlists)
     return markup
 
-# Настройки скачивания
+# Опции скачивания
 def get_ydl_opts(query_type="yt"):
     opts = {
         'format': 'bestaudio/best',
@@ -55,10 +61,13 @@ async def download_logic(query, search_prefix):
             return file_path, info.get('title', 'Music')
     return await loop.run_in_executor(None, extract)
 
-# 3. ОБРАБОТЧИКИ КОМАНД
+# 3. Обработчики
 
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
+    # Добавляем пользователя в базу данных
+    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
     welcome_text = (
         f"👋 **Привет, {message.from_user.first_name}!**\n\n"
         "Я твой персональный **Музыкальный Помощник** 🎧\n\n"
@@ -69,6 +78,17 @@ async def send_welcome(message: types.Message):
         "🌊 **Моя волна:** Функция рекомендаций, которая тебе понравится! ✨"
     )
     await message.reply(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
+
+@dp.message_handler(commands=['admin'])
+async def admin_stats(message: types.Message):
+    # Твой ID уже здесь!
+    YOUR_ADMIN_ID = 5932714152 
+    
+    if message.from_user.id == YOUR_ADMIN_ID:
+        u_count, d_count = get_stats()
+        await message.answer(f"📊 **Статистика бота:**\n\n👤 Юзеров: {u_count}\n🎵 Скачано песен: {d_count}")
+    else:
+        await message.answer("❌ У вас нет прав администратора.")
 
 @dp.message_handler(lambda message: message.text == "🔍 Найти песню")
 async def search_btn(message: types.Message):
@@ -86,18 +106,18 @@ async def wave_btn(message: types.Message):
 async def playlists_btn(message: types.Message):
     await message.answer("📂 Пришли ссылку на плейлист YouTube или SoundCloud, и я его обработаю!")
 
-# 4. ОБЩИЙ ПОИСК (должен быть в самом конце)
 @dp.message_handler()
 async def smart_download(message: types.Message):
     query = message.text
+    # Записываем скачивание в базу
+    log_download(message.from_user.id, query)
+    
     status_msg = await message.answer(f"🚀 Ищу для тебя: **{query}**...")
 
     try:
-        # Пробуем YouTube
         file_path, title = await download_logic(query, "ytsearch1")
     except Exception:
         try:
-            # Пробуем SoundCloud
             await status_msg.edit_text("🔍 Пробую найти в другой базе...")
             file_path, title = await download_logic(query, "scsearch1")
         except Exception:
