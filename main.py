@@ -2,12 +2,22 @@ import os
 import asyncio
 import yt_dlp
 import requests
+import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from database import init_db, add_user, log_download, get_user_history, add_to_playlist, get_user_playlist
 
-# НАСТРОЙКИ
+# Инициализация доп. таблицы для кэша
+def init_cache_db():
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS file_cache (query TEXT PRIMARY KEY, file_id TEXT, title TEXT)')
+    conn.commit()
+    conn.close()
+
+init_cache_db()
+
 TOKEN = os.getenv('BOT_TOKEN')
 GOOGLE_API_KEY = "AIzaSyBPqLNBRJAXxv4HyMO-WMFMns95YccOB2c"
 bot = Bot(token=TOKEN)
@@ -17,8 +27,6 @@ init_db()
 FFMPEG_EXE = os.path.join(os.getcwd(), "ffmpeg")
 COOKIE_FILES = ['cookies1.txt', 'cookies2.txt', 'cookies3.txt']
 
-# --- ГЕНЕРАЦИЯ КНОПОК ---
-
 def get_main_menu():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton("🔍 Найти песню"), KeyboardButton("📥 Скачанные"))
@@ -27,7 +35,6 @@ def get_main_menu():
 
 def get_song_keyboard(title):
     markup = InlineKeyboardMarkup()
-    # Обрезаем название для callback_data (лимит 64 байта)
     clean_title = title[:30]
     markup.add(
         InlineKeyboardButton("➕ В плейлист", callback_data=f"pl_{clean_title}"),
@@ -35,10 +42,25 @@ def get_song_keyboard(title):
     )
     return markup
 
-# --- ЛОГИКА СКАЧИВАНИЯ ---
+# --- ФУНКЦИИ КЭША ---
+def get_from_cache(query):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT file_id, title FROM file_cache WHERE query = ?', (query,))
+    res = cursor.fetchone()
+    conn.close()
+    return res
 
+def save_to_cache(query, file_id, title):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO file_cache VALUES (?, ?, ?)', (query, file_id, title))
+    conn.commit()
+    conn.close()
+
+# --- ЛОГИКА СКАЧИВАНИЯ ---
 def get_ydl_opts(cookie_file=None):
-    opts = {
+    return {
         'format': 'bestaudio/best',
         'noplaylist': True,
         'quiet': True,
@@ -46,13 +68,17 @@ def get_ydl_opts(cookie_file=None):
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'ffmpeg_location': FFMPEG_EXE,
+        'external_downloader': 'aria2c', # Ускоряет загрузку, если aria2 установлен
+        'external_downloader_args': ['-x', '16', '-s', '16', '-k', '1M'],
     }
-    if cookie_file and os.path.exists(cookie_file):
-        opts['cookiefile'] = cookie_file
-    return opts
 
 async def download_audio(query):
-    # 1. Попытка через YouTube с ротацией 3-х КУКИ
+    # 0. Проверяем кэш (МГНОВЕННО)
+    cached = get_from_cache(query)
+    if cached:
+        return "cache", cached[0], cached[1]
+
+    # 1. Попытка через куки (как раньше)
     for c_file in COOKIE_FILES:
         if os.path.exists(c_file):
             try:
@@ -63,90 +89,68 @@ async def download_audio(query):
                         path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
                         return path, entry.get('title', 'Music')
                 return await asyncio.get_event_loop().run_in_executor(None, run_yt)
-            except:
-                continue
+            except: continue
 
-    # 2. Попытка через Google API (без куки)
+    # 2. SoundCloud (быстрее чем YouTube API)
     try:
-        url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&key={GOOGLE_API_KEY}&maxResults=1"
-        api_res = requests.get(url, timeout=5).json()
-        if 'items' in api_res and len(api_res['items']) > 0:
-            v_id = api_res['items'][0]['id']['videoId']
-            v_link = f"https://www.youtube.com/watch?v={v_id}"
-            def run_api():
-                with yt_dlp.YoutubeDL(get_ydl_opts(None)) as ydl:
-                    info = ydl.extract_info(v_link, download=True)
-                    path = ydl.prepare_filename(info).rsplit('.', 1)[0] + ".mp3"
-                    return path, info.get('title', 'Music')
-            return await asyncio.get_event_loop().run_in_executor(None, run_api)
+        def run_sc():
+            with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+                info = ydl.extract_info(f"scsearch1:{query}", download=True)
+                entry = info['entries'][0]
+                path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
+                return path, entry.get('title', 'Music')
+        return await asyncio.get_event_loop().run_in_executor(None, run_sc)
     except:
-        pass
-
-    # 3. Финальная попытка через SoundCloud
-    def run_sc():
-        with yt_dlp.YoutubeDL(get_ydl_opts(None)) as ydl:
-            info = ydl.extract_info(f"scsearch1:{query}", download=True)
-            entry = info['entries'][0]
-            path = ydl.prepare_filename(entry).rsplit('.', 1)[0] + ".mp3"
-            return path, entry.get('title', 'Music')
-    return await asyncio.get_event_loop().run_in_executor(None, run_sc)
+        return None
 
 # --- ОБРАБОТЧИКИ ---
-
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    found_cookies = len([f for f in COOKIE_FILES if os.path.exists(f)])
-    await message.reply(f"🎧 Бот готов!\nНайдено куки: {found_cookies}/3\nМетоды: YouTube(3x) -> API -> SoundCloud", reply_markup=get_main_menu())
-
-@dp.callback_query_handler(lambda c: c.data.startswith(('pl_', 'dl_')))
-async def process_callback(call: types.CallbackQuery):
-    action, song_name = call.data[:2], call.data[3:]
-    if action == "pl":
-        add_to_playlist(call.from_user.id, song_name)
-        await call.answer("🎶 Добавлено в плейлист!")
-    else:
-        log_download(call.from_user.id, song_name)
-        await call.answer("📥 Добавлено в скачанные!")
 
 @dp.message_handler(lambda m: m.text == "📂 Мои Плейлисты")
 async def btn_playlist(message: types.Message):
     songs = get_user_playlist(message.from_user.id)
     if not songs: return await message.answer("📂 Плейлист пуст.")
-    await message.answer("⌛ Загружаю ваш плейлист...")
-    for s in songs:
+    
+    await message.answer(f"⚡ Начинаю мгновенную загрузку {len(songs)} треков...")
+    
+    # Запускаем задачи параллельно!
+    async def process_single_song(song_query):
         try:
-            path, title = await download_audio(s)
-            with open(path, 'rb') as f: await message.answer_audio(f, caption=f"🎶 {title}", reply_markup=get_song_keyboard(title))
-            if os.path.exists(path): os.remove(path)
-        except: continue
+            res = await download_audio(song_query)
+            if not res: return
+            
+            if res[0] == "cache":
+                await bot.send_audio(message.chat.id, res[1], caption=f"🎶 {res[2]} (из кэша)", reply_markup=get_song_keyboard(res[2]))
+            else:
+                path, title = res
+                with open(path, 'rb') as f:
+                    msg = await bot.send_audio(message.chat.id, f, caption=f"🎶 {title}", reply_markup=get_song_keyboard(title))
+                    save_to_cache(song_query, msg.audio.file_id, title)
+                if os.path.exists(path): os.remove(path)
+        except: pass
 
-@dp.message_handler(lambda m: m.text == "📥 Скачанные")
-async def btn_history(message: types.Message):
-    history = get_user_history(message.from_user.id)
-    if not history: return await message.answer("📥 История пуста.")
-    await message.answer("⌛ Загружаю историю...")
-    for q in history:
-        try:
-            path, title = await download_audio(q)
-            with open(path, 'rb') as f: await message.answer_audio(f, caption=f"🎶 {title}", reply_markup=get_song_keyboard(title))
-            if os.path.exists(path): os.remove(path)
-        except: continue
+    await asyncio.gather(*(process_single_song(s) for s in songs))
 
 @dp.message_handler()
 async def handle_message(message: types.Message):
-    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]:
-        return await message.answer("Введите название песни:", reply_markup=get_main_menu())
+    if message.text in ["🔍 Найти песню", "🌊 Моя волна"]: return await message.answer("Напиши название!")
     
-    status = await message.answer(f"🔎 Ищу: **{message.text}**...")
-    try:
-        path, title = await download_audio(message.text)
+    query = message.text
+    status = await message.answer(f"🔎 Ищу...")
+    
+    res = await download_audio(query)
+    if not res:
+        return await status.edit_text("❌ Не найдено.")
+
+    if res[0] == "cache":
+        await bot.send_audio(message.chat.id, res[1], caption=f"🎶 {res[2]} (Молния ⚡)", reply_markup=get_song_keyboard(res[2]))
+        await status.delete()
+    else:
+        path, title = res
         with open(path, 'rb') as f:
-            await bot.send_audio(message.chat.id, f, caption=f"🎶 **{title}**", reply_markup=get_song_keyboard(title))
+            msg = await bot.send_audio(message.chat.id, f, caption=f"🎶 {title}", reply_markup=get_song_keyboard(title))
+            save_to_cache(query, msg.audio.file_id, title)
         if os.path.exists(path): os.remove(path)
         await status.delete()
-    except:
-        await status.edit_text("❌ Песня не найдена ни одним из способов.")
 
 if __name__ == '__main__':
     if not os.path.exists('downloads'): os.makedirs('downloads')
